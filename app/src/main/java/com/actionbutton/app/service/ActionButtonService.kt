@@ -10,16 +10,19 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.database.ContentObserver
 import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.media.VolumeProviderCompat
 import com.actionbutton.app.MainActivity
 import com.actionbutton.app.R
 import com.actionbutton.app.actions.ActionExecutor
@@ -52,9 +55,10 @@ class ActionButtonService : Service() {
     private var audioManager: AudioManager? = null
     private var powerManager: PowerManager? = null
     private var keyguardManager: KeyguardManager? = null
+    private var volumeObserver: ContentObserver? = null
     private lateinit var silentAudioPlayer: SilentAudioLoopPlayer
 
-    private val streamVolumeMap = mutableMapOf<Int, Int>()
+    private var previousVolume = -1
     private var originalVolumeBeforeOff = -1
     private var isRestoringVolume = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -64,36 +68,18 @@ class ActionButtonService : Service() {
             if (intent?.action == VOLUME_CHANGED_ACTION) {
                 if (isRestoringVolume) return
 
-                val isLocked = keyguardManager?.isKeyguardLocked ?: true
-                val isInteractive = powerManager?.isInteractive ?: false
+                val current = intent.getIntExtra(EXTRA_VOLUME_STREAM_VALUE, -1)
+                val prev = intent.getIntExtra(EXTRA_PREV_VOLUME_STREAM_VALUE, -1)
 
-                // Only bypass when the user is actively using an unlocked device with screen on
-                if (!isLocked && isInteractive && prefs.onlyWhenScreenOff) {
-                    return
+                val delta = if (prev >= 0 && current >= 0) {
+                    current - prev
+                } else {
+                    0
                 }
-
-                val streamType = intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, AudioManager.STREAM_MUSIC)
-                val currentVolume = intent.getIntExtra(EXTRA_VOLUME_STREAM_VALUE, -1)
-                val prevFromIntent = intent.getIntExtra(EXTRA_PREV_VOLUME_STREAM_VALUE, -1)
-
-                val lastKnown = streamVolumeMap[streamType] ?: prevFromIntent
-
-                val delta = when {
-                    lastKnown >= 0 && currentVolume >= 0 -> currentVolume - lastKnown
-                    prevFromIntent >= 0 && currentVolume >= 0 -> currentVolume - prevFromIntent
-                    else -> 0
-                }
-
-                if (currentVolume >= 0) {
-                    streamVolumeMap[streamType] = currentVolume
-                }
-
-                Log.d(TAG, "Volume event: delta=$delta, cur=$currentVolume, last=$lastKnown, stream=$streamType, isLocked=$isLocked")
 
                 if (delta != 0) {
                     val direction = if (delta > 0) 1 else -1
-                    val restoreBase = if (lastKnown >= 0) lastKnown else currentVolume
-                    detector.onVolumeChanged(direction, restoreBase, streamType)
+                    handleVolumeInput(direction)
                 }
             }
         }
@@ -103,13 +89,14 @@ class ActionButtonService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> {
-                    detector.resetState()
+                    detector.reset()
                     acquireScreenOffWakeLock()
                     calibrateVolumeForScreenOff()
                     silentAudioPlayer.start()
+                    refreshMediaSession()
                 }
                 Intent.ACTION_SCREEN_ON -> {
-                    detector.resetState()
+                    detector.reset()
                     restoreVolumeAfterScreenOn()
                     releaseScreenOffWakeLock()
                 }
@@ -125,8 +112,8 @@ class ActionButtonService : Service() {
         powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
         keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
 
-        detector = VolumeKeyDetector(Looper.getMainLooper()) { triggerType, restoreToVolume, streamType ->
-            onTriggerDetected(triggerType, restoreToVolume, streamType)
+        detector = VolumeKeyDetector { triggerType ->
+            triggerAction(triggerType)
         }
 
         setupWakeLock()
@@ -134,16 +121,9 @@ class ActionButtonService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
 
         silentAudioPlayer = SilentAudioLoopPlayer(this)
-        setupLocalMediaSession()
+        setupMediaSession()
+        setupVolumeContentObserver()
         registerReceivers()
-
-        // Cache initial volumes
-        audioManager?.let { am ->
-            val musicVol = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-            streamVolumeMap[AudioManager.STREAM_MUSIC] = musicVol
-            val ringVol = am.getStreamVolume(AudioManager.STREAM_RING)
-            streamVolumeMap[AudioManager.STREAM_RING] = ringVol
-        }
 
         silentAudioPlayer.start()
         isRunning = true
@@ -159,27 +139,61 @@ class ActionButtonService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun onTriggerDetected(triggerType: TriggerType, restoreToVolume: Int, streamType: Int) {
+    private fun handleVolumeInput(direction: Int) {
+        val isLocked = keyguardManager?.isKeyguardLocked ?: true
+        val isInteractive = powerManager?.isInteractive ?: false
+
+        // Only suppress if device is actively in use (unlocked AND screen interactive)
+        if (!isLocked && isInteractive && prefs.onlyWhenScreenOff) {
+            return
+        }
+
+        detector.onVolumeKeyPressed(direction)
+    }
+
+    private fun triggerAction(triggerType: TriggerType) {
+        Log.i(TAG, "Trigger matched: ${triggerType.id}, configured: ${prefs.triggerGesture.id}")
         if (triggerType == prefs.triggerGesture) {
             acquireBriefWakeLock()
-            val action = prefs.selectedAction
+            actionExecutor.execute(prefs.selectedAction)
 
-            Log.i(TAG, "Triggered action: ${action.id}")
-            actionExecutor.execute(action)
-
-            if (restoreToVolume >= 0) {
-                restoreVolumeSilently(streamType, restoreToVolume)
+            // Silently restore volume baseline so media volume remains steady
+            audioManager?.let { am ->
+                val stream = AudioManager.STREAM_MUSIC
+                val original = am.getStreamVolume(stream)
+                mainHandler.postDelayed({
+                    try {
+                        isRestoringVolume = true
+                        am.setStreamVolume(stream, original, 0)
+                    } catch (_: Exception) {}
+                    finally {
+                        mainHandler.postDelayed({ isRestoringVolume = false }, 120)
+                    }
+                }, 150)
             }
         }
     }
 
-    private fun setupLocalMediaSession() {
+    private fun setupMediaSession() {
         try {
             mediaSession = MediaSessionCompat(this, "ActionButtonSession").apply {
                 setFlags(
                     MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
                     MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
                 )
+
+                // Intercept hardware volume keys directly via VolumeProvider
+                val volumeProvider = object : VolumeProviderCompat(
+                    VOLUME_CONTROL_RELATIVE,
+                    100,
+                    50
+                ) {
+                    override fun onAdjustVolume(direction: Int) {
+                        Log.d(TAG, "VolumeProvider onAdjustVolume: $direction")
+                        handleVolumeInput(direction)
+                    }
+                }
+                setPlaybackToRemote(volumeProvider)
 
                 val playbackState = PlaybackStateCompat.Builder()
                     .setState(
@@ -198,6 +212,43 @@ class ActionButtonService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "MediaSession setup error: ${e.message}")
+        }
+    }
+
+    private fun refreshMediaSession() {
+        try {
+            mediaSession?.isActive = true
+        } catch (_: Exception) {}
+    }
+
+    private fun setupVolumeContentObserver() {
+        audioManager?.let { am ->
+            previousVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            volumeObserver = object : ContentObserver(mainHandler) {
+                override fun onChange(selfChange: Boolean) {
+                    super.onChange(selfChange)
+                    if (isRestoringVolume) return
+
+                    val currentVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+                    val delta = currentVolume - previousVolume
+                    if (delta != 0) {
+                        Log.d(TAG, "ContentObserver volume change: delta=$delta")
+                        val direction = if (delta > 0) 1 else -1
+                        handleVolumeInput(direction)
+                        previousVolume = currentVolume
+                    }
+                }
+            }
+
+            try {
+                contentResolver.registerContentObserver(
+                    Settings.System.CONTENT_URI,
+                    true,
+                    volumeObserver!!
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "ContentObserver registration error: ${e.message}")
+            }
         }
     }
 
@@ -220,40 +271,24 @@ class ActionButtonService : Service() {
         }
     }
 
-    private fun restoreVolumeSilently(streamType: Int, targetVolume: Int) {
-        val am = audioManager ?: return
-        val validStream = if (streamType in 0..10) streamType else AudioManager.STREAM_MUSIC
-        mainHandler.postDelayed({
-            try {
-                isRestoringVolume = true
-                am.setStreamVolume(validStream, targetVolume, 0)
-                streamVolumeMap[validStream] = targetVolume
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to restore volume: ${e.message}")
-            } finally {
-                mainHandler.postDelayed({ isRestoringVolume = false }, 100)
-            }
-        }, 80)
-    }
-
     private fun calibrateVolumeForScreenOff() {
         audioManager?.let { am ->
             val stream = AudioManager.STREAM_MUSIC
             val current = am.getStreamVolume(stream)
             val max = am.getStreamMaxVolume(stream)
             originalVolumeBeforeOff = current
+            previousVolume = current
 
             val targetSafeVolume = when {
-                current < 4 -> 4
-                current > max - 4 -> (max - 4).coerceAtLeast(4)
+                current < 3 -> 3
+                current > max - 3 -> (max - 3).coerceAtLeast(3)
                 else -> current
             }
-
-            streamVolumeMap[stream] = targetSafeVolume
 
             if (targetSafeVolume != current) {
                 isRestoringVolume = true
                 am.setStreamVolume(stream, targetSafeVolume, 0)
+                previousVolume = targetSafeVolume
                 mainHandler.postDelayed({ isRestoringVolume = false }, 100)
             }
         }
@@ -267,7 +302,7 @@ class ActionButtonService : Service() {
                 if (current != originalVolumeBeforeOff) {
                     isRestoringVolume = true
                     am.setStreamVolume(stream, originalVolumeBeforeOff, 0)
-                    streamVolumeMap[stream] = originalVolumeBeforeOff
+                    previousVolume = originalVolumeBeforeOff
                     mainHandler.postDelayed({ isRestoringVolume = false }, 100)
                 }
             }
@@ -346,7 +381,7 @@ class ActionButtonService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         isRunning = false
-        detector.resetState()
+        detector.reset()
         silentAudioPlayer.stop()
 
         try {
@@ -354,6 +389,12 @@ class ActionButtonService : Service() {
             unregisterReceiver(screenReceiver)
         } catch (e: Exception) {
             Log.e(TAG, "Error unregistering receivers: ${e.message}")
+        }
+
+        volumeObserver?.let {
+            try {
+                contentResolver.unregisterContentObserver(it)
+            } catch (_: Exception) {}
         }
 
         mediaSession?.release()

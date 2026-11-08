@@ -1,116 +1,87 @@
 package com.actionbutton.app.service
 
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.actionbutton.app.model.TriggerType
 
 class VolumeKeyDetector(
-    mainLooper: Looper = Looper.getMainLooper(),
-    private val onTriggerAction: (TriggerType, Int, Int) -> Unit
+    private val onTriggerAction: (TriggerType) -> Unit
 ) {
     companion object {
         private const val TAG = "VolumeKeyDetector"
-        private const val DOUBLE_CLICK_TIMEOUT_MS = 650L
-        private const val DEBOUNCE_MIN_INTERVAL_MS = 40L
-        private const val ACTION_COOLDOWN_MS = 380L
+        private const val DOUBLE_CLICK_MIN_MS = 65L
+        private const val DOUBLE_CLICK_MAX_MS = 700L
+        private const val LONG_PRESS_WINDOW_MS = 500L
     }
 
-    private val handler = Handler(mainLooper)
+    private var lastVolDownTime = 0L
+    private var lastVolUpTime = 0L
+    private var volDownRepeatCount = 0
+    private var volUpRepeatCount = 0
 
-    private enum class State {
-        IDLE,
-        FIRST_PRESS_PENDING,
-        COOLDOWN
-    }
+    fun onVolumeKeyPressed(direction: Int) {
+        val now = SystemClock.elapsedRealtime()
 
-    private var state = State.IDLE
-    private var activeDirection = 0
-    private var initialVolumeLevel = -1
-    private var activeStreamType = -1
-    private var lastEventTime = 0L
-    private var repeatPressCount = 0
+        if (direction < 0) {
+            // Volume Down
+            val diff = now - lastVolDownTime
+            Log.d(TAG, "Volume Down input: diff=${diff}ms, repeatCount=$volDownRepeatCount")
 
-    private val singlePressTimeoutRunnable = Runnable {
-        resetState()
-    }
-
-    private val cooldownFinishedRunnable = Runnable {
-        resetState()
-    }
-
-    fun onVolumeChanged(direction: Int, originalVolumeBeforeChange: Int, streamType: Int) {
-        val now = SystemClock.uptimeMillis()
-        val elapsedSinceLast = now - lastEventTime
-
-        if (elapsedSinceLast < DEBOUNCE_MIN_INTERVAL_MS && direction == activeDirection) {
-            return
-        }
-
-        if (state == State.COOLDOWN) {
-            return
-        }
-
-        lastEventTime = now
-
-        when (state) {
-            State.IDLE -> {
-                state = State.FIRST_PRESS_PENDING
-                activeDirection = direction
-                initialVolumeLevel = originalVolumeBeforeChange
-                activeStreamType = streamType
-                repeatPressCount = 1
-
-                handler.postDelayed(singlePressTimeoutRunnable, DOUBLE_CLICK_TIMEOUT_MS)
-            }
-
-            State.FIRST_PRESS_PENDING -> {
-                if (direction == activeDirection) {
-                    repeatPressCount++
-
-                    if (repeatPressCount == 2) {
-                        handler.removeCallbacks(singlePressTimeoutRunnable)
-
-                        val trigger = if (activeDirection < 0) TriggerType.VOL_DOWN_DOUBLE else TriggerType.VOL_UP_DOUBLE
-                        val restoreTo = initialVolumeLevel
-                        val stream = activeStreamType
-
-                        Log.d(TAG, "Double click detected: $trigger")
-                        state = State.COOLDOWN
-                        handler.postDelayed(cooldownFinishedRunnable, ACTION_COOLDOWN_MS)
-
-                        onTriggerAction(trigger, restoreTo, stream)
-                    } else if (repeatPressCount >= 3) {
-                        handler.removeCallbacks(singlePressTimeoutRunnable)
-
-                        val trigger = if (activeDirection < 0) TriggerType.VOL_DOWN_LONG else TriggerType.VOL_UP_LONG
-                        val restoreTo = initialVolumeLevel
-                        val stream = activeStreamType
-
-                        Log.d(TAG, "Long press detected: $trigger")
-                        state = State.COOLDOWN
-                        handler.postDelayed(cooldownFinishedRunnable, ACTION_COOLDOWN_MS)
-
-                        onTriggerAction(trigger, restoreTo, stream)
+            if (diff in DOUBLE_CLICK_MIN_MS..DOUBLE_CLICK_MAX_MS) {
+                volDownRepeatCount++
+                if (volDownRepeatCount >= 2) {
+                    // Check if consecutive rapid repeats constitute a Long Press
+                    if (volDownRepeatCount >= 3 && diff < 250L) {
+                        Log.i(TAG, "VOL_DOWN_LONG triggered")
+                        lastVolDownTime = 0L
+                        volDownRepeatCount = 0
+                        onTriggerAction(TriggerType.VOL_DOWN_LONG)
+                        return
                     }
-                } else {
-                    resetState()
-                    onVolumeChanged(direction, originalVolumeBeforeChange, streamType)
-                }
-            }
 
-            State.COOLDOWN -> {}
+                    Log.i(TAG, "VOL_DOWN_DOUBLE triggered (diff: ${diff}ms)")
+                    lastVolDownTime = 0L
+                    volDownRepeatCount = 0
+                    onTriggerAction(TriggerType.VOL_DOWN_DOUBLE)
+                }
+            } else if (diff > DOUBLE_CLICK_MAX_MS || lastVolDownTime == 0L) {
+                // First press or timeout exceeded
+                lastVolDownTime = now
+                volDownRepeatCount = 1
+            }
+            // diff < DOUBLE_CLICK_MIN_MS: ignored as duplicate listener bounce
+        } else if (direction > 0) {
+            // Volume Up
+            val diff = now - lastVolUpTime
+            Log.d(TAG, "Volume Up input: diff=${diff}ms, repeatCount=$volUpRepeatCount")
+
+            if (diff in DOUBLE_CLICK_MIN_MS..DOUBLE_CLICK_MAX_MS) {
+                volUpRepeatCount++
+                if (volUpRepeatCount >= 2) {
+                    if (volUpRepeatCount >= 3 && diff < 250L) {
+                        Log.i(TAG, "VOL_UP_LONG triggered")
+                        lastVolUpTime = 0L
+                        volUpRepeatCount = 0
+                        onTriggerAction(TriggerType.VOL_UP_LONG)
+                        return
+                    }
+
+                    Log.i(TAG, "VOL_UP_DOUBLE triggered (diff: ${diff}ms)")
+                    lastVolUpTime = 0L
+                    volUpRepeatCount = 0
+                    onTriggerAction(TriggerType.VOL_UP_DOUBLE)
+                }
+            } else if (diff > DOUBLE_CLICK_MAX_MS || lastVolUpTime == 0L) {
+                lastVolUpTime = now
+                volUpRepeatCount = 1
+            }
         }
     }
 
-    fun resetState() {
-        handler.removeCallbacks(singlePressTimeoutRunnable)
-        handler.removeCallbacks(cooldownFinishedRunnable)
-        state = State.IDLE
-        activeDirection = 0
-        initialVolumeLevel = -1
-        activeStreamType = -1
-        repeatPressCount = 0
+    fun reset() {
+        lastVolDownTime = 0L
+        lastVolUpTime = 0L
+        volDownRepeatCount = 0
+        volUpRepeatCount = 0
     }
 }
