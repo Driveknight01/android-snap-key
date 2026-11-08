@@ -1,6 +1,9 @@
 package com.actionbutton.app.actions
 
+import android.app.ActivityOptions
+import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.hardware.camera2.CameraAccessException
@@ -10,6 +13,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -18,6 +22,8 @@ import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
 import android.widget.Toast
+import androidx.core.app.NotificationCompat
+import com.actionbutton.app.R
 import com.actionbutton.app.data.PreferencesManager
 import com.actionbutton.app.model.ActionType
 
@@ -26,12 +32,14 @@ class ActionExecutor(private val context: Context) {
     private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? CameraManager
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+    private val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
     private val prefs = PreferencesManager(context)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val voiceRecorderManager = VoiceRecorderManager(context)
 
     companion object {
         private const val TAG = "ActionExecutor"
+        private const val CHANNEL_CAMERA_LAUNCH_ID = "action_button_camera_channel"
         private var isFlashlightOn = false
     }
 
@@ -59,7 +67,8 @@ class ActionExecutor(private val context: Context) {
             return
         }
 
-        if (prefs.hapticFeedbackEnabled && actionType != ActionType.RECORDER) {
+        // Recorder manages its own distinct vibration feedback
+        if (prefs.hapticFeedbackEnabled && actionType != ActionType.RECORDER && actionType != ActionType.SOUND_MODE) {
             triggerHapticFeedback()
         }
 
@@ -105,48 +114,156 @@ class ActionExecutor(private val context: Context) {
         return null
     }
 
+    /**
+     * Toggles between Normal (Ring) and Vibrate.
+     * Switching between NORMAL and VIBRATE does not require DND permissions on Android,
+     * avoiding SecurityException when DND access is not granted.
+     */
     private fun toggleSoundMode() {
         val am = audioManager ?: return
         try {
             val currentMode = am.ringerMode
-            val nextMode = when (currentMode) {
-                AudioManager.RINGER_MODE_NORMAL -> AudioManager.RINGER_MODE_VIBRATE
-                AudioManager.RINGER_MODE_VIBRATE -> AudioManager.RINGER_MODE_SILENT
-                else -> AudioManager.RINGER_MODE_NORMAL
+            val nextMode = if (currentMode == AudioManager.RINGER_MODE_NORMAL) {
+                AudioManager.RINGER_MODE_VIBRATE
+            } else {
+                AudioManager.RINGER_MODE_NORMAL
             }
             am.ringerMode = nextMode
 
-            val modeName = when (nextMode) {
-                AudioManager.RINGER_MODE_NORMAL -> "Chuông"
-                AudioManager.RINGER_MODE_VIBRATE -> "Rung"
-                AudioManager.RINGER_MODE_SILENT -> "Im lặng"
-                else -> "Bình thường"
-            }
-            Log.i(TAG, "Sound mode changed to: $modeName")
+            val modeName = if (nextMode == AudioManager.RINGER_MODE_NORMAL) "Chuông" else "Rung"
+            Log.i(TAG, "Sound mode switched to: $modeName (prev: $currentMode)")
 
-            if (nextMode == AudioManager.RINGER_MODE_VIBRATE) {
-                triggerDoubleHapticPulse()
+            if (prefs.hapticFeedbackEnabled) {
+                if (nextMode == AudioManager.RINGER_MODE_VIBRATE) {
+                    triggerDoubleHapticPulse()
+                } else {
+                    triggerSingleHapticPulse()
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error toggling ringer mode: ${e.message}")
         }
     }
 
+    /**
+     * Launches the camera over lockscreen when screen is off/locked.
+     * Uses WakeLock + High-Priority Notification with FullScreenIntent to bypass
+     * background activity launch restrictions.
+     */
     private fun openCamera() {
         try {
-            val intent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            wakeUpScreen()
+
+            val cameraIntent = getCameraIntent().apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                )
             }
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            try {
-                val fallbackIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                1002,
+                cameraIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_CAMERA_LAUNCH_ID,
+                    "Camera Launch",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    setSound(null, null)
+                    enableVibration(false)
+                    setShowBadge(false)
                 }
-                context.startActivity(fallbackIntent)
-            } catch (ex: Exception) {
-                Log.e(TAG, "Failed to launch camera: ${ex.message}")
+                notificationManager?.createNotificationChannel(channel)
             }
+
+            val fullScreenNotif = NotificationCompat.Builder(context, CHANNEL_CAMERA_LAUNCH_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle("Máy ảnh")
+                .setContentText("Đang mở máy ảnh...")
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setFullScreenIntent(pendingIntent, true)
+                .setAutoCancel(true)
+                .setTimeoutAfter(2000)
+                .build()
+
+            notificationManager?.notify(1003, fullScreenNotif)
+            mainHandler.postDelayed({ notificationManager?.cancel(1003) }, 2000)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val options = ActivityOptions.makeBasic().apply {
+                    setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                }.toBundle()
+                try {
+                    pendingIntent.send(context, 0, null, null, null, null, options)
+                } catch (_: Exception) {}
+            } else {
+                try {
+                    pendingIntent.send()
+                } catch (_: Exception) {}
+            }
+
+            try {
+                context.startActivity(cameraIntent)
+            } catch (_: Exception) {}
+
+            Log.i(TAG, "Camera launch intent dispatched")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error launching camera: ${e.message}")
+        }
+    }
+
+    private fun getCameraIntent(): Intent {
+        val pm = context.packageManager
+
+        // 1. Try secure lockscreen camera intent
+        val secureIntent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE)
+        if (secureIntent.resolveActivity(pm) != null) {
+            return secureIntent
+        }
+
+        // 2. Try standard still image camera intent
+        val standardIntent = Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+        if (standardIntent.resolveActivity(pm) != null) {
+            return standardIntent
+        }
+
+        // 3. Try resolving known OEM camera packages (Realme / Oppo / OnePlus / Android)
+        val oemPackages = listOf(
+            "com.oplus.camera",
+            "com.coloros.camera",
+            "com.android.camera",
+            "com.google.android.GoogleCamera"
+        )
+        for (pkg in oemPackages) {
+            val launchIntent = pm.getLaunchIntentForPackage(pkg)
+            if (launchIntent != null) {
+                return launchIntent
+            }
+        }
+
+        // 4. Fallback capture intent
+        return Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+    }
+
+    private fun wakeUpScreen() {
+        try {
+            @Suppress("DEPRECATION")
+            val wakeLock = powerManager?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                PowerManager.ON_AFTER_RELEASE,
+                "ActionButton:CameraWake"
+            )
+            wakeLock?.acquire(3000)
+        } catch (e: Exception) {
+            Log.e(TAG, "Wake up screen error: ${e.message}")
         }
     }
 
@@ -209,6 +326,15 @@ class ActionExecutor(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Haptic feedback error: ${e.message}")
         }
+    }
+
+    private fun triggerSingleHapticPulse() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val v = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                v?.vibrate(VibrationEffect.createOneShot(75, VibrationEffect.DEFAULT_AMPLITUDE))
+            }
+        } catch (_: Exception) {}
     }
 
     private fun triggerDoubleHapticPulse() {
