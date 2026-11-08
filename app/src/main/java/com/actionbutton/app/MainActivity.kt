@@ -191,14 +191,6 @@ fun ActionButtonScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         Text(
-            text = "NÚT TÁC VỤ",
-            style = MaterialTheme.typography.labelSmall.copy(
-                letterSpacing = 2.sp,
-                color = TextMuted,
-                fontWeight = FontWeight.Bold
-            )
-        )
-        Text(
             text = "Action Button",
             style = MaterialTheme.typography.headlineLarge.copy(
                 fontSize = 28.sp,

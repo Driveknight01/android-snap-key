@@ -75,7 +75,7 @@ fun RealmeOptimizationCard(
             )
             Spacer(modifier = Modifier.width(12.dp))
             Text(
-                text = "Tối ưu hóa chạy ngầm (Realme UI 6.0)",
+                text = "Tối ưu hóa chạy ngầm",
                 style = MaterialTheme.typography.titleMedium.copy(
                     fontWeight = FontWeight.Bold,
                     fontSize = 15.sp,

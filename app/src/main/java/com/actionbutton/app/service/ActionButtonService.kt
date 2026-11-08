@@ -22,7 +22,6 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.media.VolumeProviderCompat
 import com.actionbutton.app.MainActivity
 import com.actionbutton.app.R
 import com.actionbutton.app.actions.ActionExecutor
@@ -70,6 +69,7 @@ class ActionButtonService : Service() {
 
                 val current = intent.getIntExtra(EXTRA_VOLUME_STREAM_VALUE, -1)
                 val prev = intent.getIntExtra(EXTRA_PREV_VOLUME_STREAM_VALUE, -1)
+                val streamType = intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, AudioManager.STREAM_MUSIC)
 
                 val delta = if (prev >= 0 && current >= 0) {
                     current - prev
@@ -143,7 +143,7 @@ class ActionButtonService : Service() {
         val isLocked = keyguardManager?.isKeyguardLocked ?: true
         val isInteractive = powerManager?.isInteractive ?: false
 
-        // Only suppress if device is actively in use (unlocked AND screen interactive)
+        // When screen is ON and unlocked, do not intercept: let media volume adjust naturally
         if (!isLocked && isInteractive && prefs.onlyWhenScreenOff) {
             return
         }
@@ -160,11 +160,12 @@ class ActionButtonService : Service() {
             // Silently restore volume baseline so media volume remains steady
             audioManager?.let { am ->
                 val stream = AudioManager.STREAM_MUSIC
-                val original = am.getStreamVolume(stream)
+                val original = if (originalVolumeBeforeOff >= 0) originalVolumeBeforeOff else am.getStreamVolume(stream)
                 mainHandler.postDelayed({
                     try {
                         isRestoringVolume = true
                         am.setStreamVolume(stream, original, 0)
+                        previousVolume = original
                     } catch (_: Exception) {}
                     finally {
                         mainHandler.postDelayed({ isRestoringVolume = false }, 120)
@@ -174,6 +175,11 @@ class ActionButtonService : Service() {
         }
     }
 
+    /**
+     * Sets playback to LOCAL STREAM_MUSIC.
+     * Crucial: NEVER use setPlaybackToRemote(), as that causes Android to display
+     * a custom app-specific volume bar instead of the default Media volume slider.
+     */
     private fun setupMediaSession() {
         try {
             mediaSession = MediaSessionCompat(this, "ActionButtonSession").apply {
@@ -182,18 +188,8 @@ class ActionButtonService : Service() {
                     MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
                 )
 
-                // Intercept hardware volume keys directly via VolumeProvider
-                val volumeProvider = object : VolumeProviderCompat(
-                    VOLUME_CONTROL_RELATIVE,
-                    100,
-                    50
-                ) {
-                    override fun onAdjustVolume(direction: Int) {
-                        Log.d(TAG, "VolumeProvider onAdjustVolume: $direction")
-                        handleVolumeInput(direction)
-                    }
-                }
-                setPlaybackToRemote(volumeProvider)
+                // Set to local STREAM_MUSIC: system always shows standard Media volume bar
+                setPlaybackToLocal(AudioManager.STREAM_MUSIC)
 
                 val playbackState = PlaybackStateCompat.Builder()
                     .setState(
@@ -232,7 +228,7 @@ class ActionButtonService : Service() {
                     val currentVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
                     val delta = currentVolume - previousVolume
                     if (delta != 0) {
-                        Log.d(TAG, "ContentObserver volume change: delta=$delta")
+                        Log.d(TAG, "ContentObserver volume change: delta=$delta ($previousVolume -> $currentVolume)")
                         val direction = if (delta > 0) 1 else -1
                         handleVolumeInput(direction)
                         previousVolume = currentVolume
