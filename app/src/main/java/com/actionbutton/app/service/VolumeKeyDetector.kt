@@ -12,9 +12,9 @@ class VolumeKeyDetector(
 ) {
     companion object {
         private const val TAG = "VolumeKeyDetector"
-        private const val DOUBLE_CLICK_TIMEOUT_MS = 550L
-        private const val DEBOUNCE_MIN_INTERVAL_MS = 70L
-        private const val ACTION_COOLDOWN_MS = 650L
+        private const val DOUBLE_CLICK_TIMEOUT_MS = 650L
+        private const val DEBOUNCE_MIN_INTERVAL_MS = 40L
+        private const val ACTION_COOLDOWN_MS = 380L
     }
 
     private val handler = Handler(mainLooper)
@@ -44,7 +44,6 @@ class VolumeKeyDetector(
         val now = SystemClock.uptimeMillis()
         val elapsedSinceLast = now - lastEventTime
 
-        // Drop hardware bounces and duplicate events from dual listeners
         if (elapsedSinceLast < DEBOUNCE_MIN_INTERVAL_MS && direction == activeDirection) {
             return
         }
