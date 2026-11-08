@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer Action Neon Ring -->
+    <path
+        android:pathData="M54,54m-33,0a33,33 0,1 1,66 0a33,33 0,1 1,-66 0"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:startX="21"
+                android:startY="21"
+                android:endX="87"
+                android:endY="87"
+                android:type="linear">
+                <item android:color="#FFB300" android:offset="0.0" />
+                <item android:color="#FF9500" android:offset="0.45" />
+                <item android:color="#FF3B30" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Outer Ring Gap & Dots (Action Dial Accent) -->
+    <path
+        android:pathData="M54,18 L54,17 M90,54 L91,54 M54,90 L54,91 M18,54 L17,54"
+        android:strokeColor="#FFA726"
+        android:strokeWidth="2.5"
+        android:strokeLineCap="round" />
+
+    <!-- Inner Metallic Button Cap (Bevel & Core) -->
+    <path
+        android:pathData="M54,54m-27,0a27,27 0,1 1,54 0a27,27 0,1 1,-54 0"
+        android:fillColor="#15161C"
+        android:strokeColor="#2C2E3B"
+        android:strokeWidth="1.2" />
+
+    <!-- Button Surface Gradient Highlight -->
+    <path
+        android:pathData="M54,54m-24.5,0a24.5,24.5 0,1 1,49 0a24.5,24.5 0,1 1,-49 0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="54"
+                android:centerY="42"
+                android:gradientRadius="24.5"
+                android:type="radial">
+                <item android:color="#242632" android:offset="0.0" />
+                <item android:color="#171820" android:offset="0.75" />
+                <item android:color="#121319" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Center Icon: Dynamic Pro Action Bolt -->
+    <path
+        android:pathData="M56.5,35 L44,51.5 L51.5,51.5 L48.5,69 L63,48.5 L55,48.5 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="44"
+                android:startY="35"
+                android:endX="63"
+                android:endY="69"
+                android:type="linear">
+                <item android:color="#FFE082" android:offset="0.0" />
+                <item android:color="#FFB300" android:offset="0.3" />
+                <item android:color="#FF9100" android:offset="0.7" />
+                <item android:color="#FF3D00" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Inner Core Crisp Glow Spark -->
+    <path
+        android:pathData="M55.2,38 L46.5,49.5 L52.5,49.5 L50.2,63 L60,47.5 L54,47.5 Z"
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.18" />
+
+</vector>

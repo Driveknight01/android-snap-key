@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="apple_orange">#FFFF9500</color>
+    <color name="apple_blue">#FF0A84FF</color>
+    <color name="surface_dark">#FF121214</color>
+    <color name="card_dark">#FF1C1C1E</color>
+    <color name="card_border">#FF2C2C2E</color>
+</resources>

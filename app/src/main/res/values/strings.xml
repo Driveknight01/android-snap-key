@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Action Button</string>
+    <string name="service_notification_title">Action Button</string>
+    <string name="service_notification_desc">Dịch vụ đang hoạt động</string>
+    <string name="channel_name">Action Button Service</string>
+    <string name="channel_desc">Duy trì dịch vụ phím tác vụ ngầm</string>
+</resources>
